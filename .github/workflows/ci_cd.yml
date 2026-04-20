@@ -1,0 +1,169 @@
+# .github/workflows/ci_cd.yml
+# ----------------------------
+# Pipeline CI/CD complet pour le projet Sonar ML API
+#
+# DÉCLENCHEURS :
+#   - push sur main       → CI + build Docker + push sur Docker Hub
+#   - pull request        → CI uniquement (tests + lint)
+#   - workflow_dispatch   → déclenchement manuel depuis GitHub
+#
+# SECRETS NÉCESSAIRES (à configurer dans GitHub → Settings → Secrets) :
+#   DOCKERHUB_USERNAME    → ton username Docker Hub
+#   DOCKERHUB_TOKEN       → ton access token Docker Hub (pas le mot de passe)
+
+name: CI/CD — Sonar ML API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:      # déclenchement manuel
+
+# ── Variables globales ────────────────────────────────────────────────────────
+env:
+  IMAGE_NAME: sonar-ml-api
+  PYTHON_VERSION: "3.11"
+
+# ══════════════════════════════════════════════════════════════════════════════
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  #  JOB 1 — TESTS & LINT
+  #  Vérifie la qualité du code et que les tests passent.
+  #  S'exécute à chaque push ET pull request.
+  # ────────────────────────────────────────────────────────────────────────────
+  test:
+    name: 🧪 Tests & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # 1. Récupérer le code du repo
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # 2. Installer Python
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip              # cache pip pour accélérer les runs suivants
+
+      # 3. Installer les dépendances
+      - name: Installation des dépendances
+        run: pip install -r requirements.txt
+
+      # 4. Lint avec flake8 (vérifie la syntaxe et le style)
+      - name: Lint — flake8
+        run: |
+          pip install flake8
+          # E501 = ligne trop longue (on ignore pour ce projet)
+          flake8 app/ ml/ tests/ --max-line-length=100 --ignore=E501
+
+      # 5. Lancer les tests pytest
+      - name: Tests — pytest
+        run: |
+          pytest tests/ -v --tb=short
+        # Si un test échoue, le job échoue et le pipeline s'arrête ici
+
+      # 6. Rapport de couverture (optionnel mais pro)
+      - name: Couverture de code
+        run: |
+          pip install pytest-cov
+          pytest tests/ --cov=app --cov-report=term-missing --cov-fail-under=70
+
+
+  # ────────────────────────────────────────────────────────────────────────────
+  #  JOB 2 — BUILD DOCKER
+  #  Construit l'image Docker (qui entraîne aussi le modèle à l'intérieur).
+  #  S'exécute seulement sur push main, APRÈS que les tests passent.
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: 🐳 Build Docker
+    runs-on: ubuntu-latest
+    needs: test             # attend que le job "test" réussisse
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Active Docker BuildKit pour le multi-stage build
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build de l'image (sans push pour l'instant — on vérifie que ça compile)
+      - name: Build de l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: api
+          push: false                    # juste build, pas push
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha           # cache GitHub Actions
+          cache-to: type=gha,mode=max
+
+
+  # ────────────────────────────────────────────────────────────────────────────
+  #  JOB 3 — PUSH DOCKER HUB
+  #  Tag l'image avec la version et la publie sur Docker Hub.
+  #  S'exécute seulement sur push main, APRÈS le build.
+  # ────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: 🚀 Push Docker Hub
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Connexion à Docker Hub avec les secrets du repo
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Génération automatique des tags :
+      #   - :latest pour chaque push sur main
+      #   - :sha-XXXXXXX pour tracer exactement quel commit a produit l'image
+      - name: Extraction des metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+
+      # Build final + push vers Docker Hub
+      - name: Build & Push vers Docker Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Résumé dans l'interface GitHub
+      - name: Résumé du déploiement
+        run: |
+          echo "## 🚀 Image publiée" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags :**" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit :** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
