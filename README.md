@@ -109,7 +109,4 @@ The `.github/workflows/ci_cd.yml` workflow defines 3 jobs:
 
 ### Configure GitHub Secrets
 
-In your repository, go to Settings → Secrets and variables → Actions:
 
-- `DOCKERHUB_USERNAME` → your Docker Hub username
-- `DOCKERHUB_TOKEN` → [create one here](https://hub.docker.com/settings/security)
