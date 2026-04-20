@@ -1,0 +1,55 @@
+# docker-compose.yml
+# ------------------
+# Lance l'API + un service optionnel de monitoring.
+#
+# Commandes utiles :
+#   docker compose up --build       ← build + démarrage
+#   docker compose up -d            ← démarrage en background
+#   docker compose logs -f api      ← logs en temps réel
+#   docker compose down             ← arrêt et suppression des conteneurs
+
+version: "3.9"
+
+services:
+
+  # ── Service principal : l'API FastAPI ─────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api          # utilise le stage "api" du Dockerfile multi-stage
+    container_name: sonar-api
+    ports:
+      - "8000:8000"        # localhost:8000 → conteneur:8000
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # En développement, monte le dossier models local
+      # pour éviter de rebuilder à chaque changement de modèle
+      - ./models:/app/models:ro   # :ro = read-only dans le conteneur
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Service trainer : entraîne le modèle et s'arrête ────────────────────
+  # Lance avec : docker compose run --rm trainer
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: trainer
+    container_name: sonar-trainer
+    volumes:
+      # Le modèle produit ici est accessible par l'API via le volume partagé
+      - ./models:/app/models
+    profiles:
+      - training           # N'est PAS lancé par défaut, seulement avec --profile training
+
+# ── Réseau interne ────────────────────────────────────────────────────────────
+networks:
+  default:
+    name: sonar-network
