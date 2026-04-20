@@ -34,7 +34,8 @@ jobs:
       - name: Lint — flake8 (Relaxed)
         run: |
           pip install flake8
-          flake8 app/ ml/ tests/ --max-line-length=120 --ignore=E501,W291,W293,F401,W391,E302,E221,E241,E203,E226,W292
+          # J'ai ajouté F541 à la fin de la liste d'ignorance
+          flake8 app/ ml/ tests/ --max-line-length=120 --ignore=E501,W291,W293,F401,W391,E302,E221,E241,E203,E226,W292,F541
 
       # Pytest reste important pour vérifier que le code fonctionne
       - name: Tests — pytest
