@@ -40,6 +40,8 @@ jobs:
       # Pytest reste important pour vérifier que le code fonctionne
       - name: Tests — pytest
         run: |
+          # On ajoute le dossier courant (.) au chemin de recherche Python
+          export PYTHONPATH=$PYTHONPATH:.
           pytest tests/ -v --tb=short
 
       # On baisse le seuil de couverture à 40% pour ne pas bloquer le projet au début
