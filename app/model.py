@@ -1,87 +1,180 @@
-"""
-app/model.py
-------------
-Responsable du chargement du bundle (model + scaler + metadata)
-et de l'inférence. Séparé de main.py pour la testabilité.
-"""
-
+import logging
 import pickle
-import numpy as np
 from pathlib import Path
+from typing import Dict, List, Tuple
 
-# Chemin vers le bundle sauvegardé par ml/train.py
+import numpy as np
+
+# 
+#  Configuration
+#
+
 MODEL_PATH = Path("models/sonar_model.pkl")
 MODEL_VERSION = "1.0.0"
 
-# Variable globale — chargée une seule fois au démarrage de l'API
-_bundle = None
+# Module-level cache: initialized once during API startup
+_bundle: Dict | None = None
+
+logger = logging.getLogger(__name__)
 
 
-def load_model() -> dict:
+# 
+#  Model Loading
+# 
+def load_model() -> Dict:
     """
-    Charge le bundle pickle depuis le disque.
-    Appelé au démarrage de FastAPI (lifespan event).
-    Lève une exception si le fichier est absent.
+    Load the model bundle from disk into module-level cache.
+
+    This function is called once during API startup (lifespan event).
+    Subsequent requests retrieve the cached model via get_bundle().
+
+    Returns:
+        Dict: The loaded model bundle containing:
+            - "model": Trained SVC classifier
+            - "scaler": Fitted StandardScaler
+            - "label_map": Dict mapping class indices to labels
+            - "best_params": Dict of hyperparameters
+            - "cv_score": Float cross-validation score
+
+    Raises:
+        FileNotFoundError: If the model file does not exist.
+        pickle.UnpicklingError: If the file cannot be deserialized.
     """
     global _bundle
 
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Modèle introuvable : {MODEL_PATH}\n"
-            "Lance d'abord : python ml/train.py"
+        error_msg = (
+            f"Model file not found: {MODEL_PATH}\n"
+            f"Please run: python ml/train.py"
         )
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
 
-    with open(MODEL_PATH, "rb") as f:
-        _bundle = pickle.load(f)
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            _bundle = pickle.load(f)
 
-    print(f"✅ Modèle chargé — params : {_bundle['best_params']}")
-    print(f"   CV score : {_bundle['cv_score']}")
-    return _bundle
+        logger.info(
+            f"✅ Model loaded successfully | Params: {_bundle['best_params']}"
+        )
+        logger.info(f"   Cross-validation score: {_bundle['cv_score']}")
+
+        return _bundle
+
+    except Exception as e:
+        logger.error(f"Failed to load model bundle: {e}")
+        raise
 
 
-def get_bundle() -> dict:
-    """Retourne le bundle chargé. Lève une erreur si non initialisé."""
-    if _bundle is None:
-        raise RuntimeError("Le modèle n'est pas encore chargé.")
-    return _bundle
-
-
-def predict(features: list[float]) -> dict:
+def get_bundle() -> Dict:
     """
-    Prend 60 valeurs brutes, les normalise avec le scaler,
-    et retourne la prédiction + les probabilités.
+    Retrieve the cached model bundle.
 
-    Retourne un dict compatible avec SonarPrediction.
+    Returns:
+        Dict: The global model bundle.
+
+    Raises:
+        RuntimeError: If the model has not been loaded yet.
+    """
+    if _bundle is None:
+        error_msg = "Model has not been loaded. Please start the API first."
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    return _bundle
+
+
+# 
+#  Inference
+# 
+
+def predict(features: List[float]) -> Dict[str, float | str]:
+    """
+    Perform inference on a single sonar signal.
+
+    This function:
+    1. Loads the model bundle
+    2. Validates and reshapes input features
+    3. Applies the same scaling used during training
+    4. Generates predictions and class probabilities
+    5. Maps predictions back to original class labels
+
+    Args:
+        features: List of 60 float values representing sonar energy levels.
+                  Should be in the range [0.0, 1.0].
+
+    Returns:
+        Dict containing:
+            - "prediction": Predicted class label ("M" or "R")
+            - "label_full": Human-readable label ("Mine" or "Rock")
+            - "probability_mine": Probability of being a Mine [0.0, 1.0]
+            - "probability_rock": Probability of being a Rock [0.0, 1.0]
+            - "confidence": Maximum of the two probabilities
+            - "model_version": Version of the loaded model
+
+    Raises:
+        RuntimeError: If the model is not loaded.
+        ValueError: If feature dimensions are incorrect.
     """
     bundle = get_bundle()
-    model  = bundle["model"]
+    model = bundle["model"]
     scaler = bundle["scaler"]
-    label_map = bundle["label_map"]   # {0: 'M', 1: 'R'} ou inverse
+    label_map = bundle["label_map"]
 
-    # Reshape → (1, 60) comme attendu par sklearn
-    X = np.array(features).reshape(1, -1)
+    # Reshape to (1, 60) for sklearn compatibility
+    features_array = np.array(features, dtype=np.float32).reshape(1, -1)
 
-    # Normalisation avec le MÊME scaler que l'entraînement
-    X_scaled = scaler.transform(X)
+    # Apply the training scaler (critical for feature normalization)
+    features_scaled = scaler.transform(features_array)
 
-    # Prédiction de la classe + probabilités
-    pred_class = int(model.predict(X_scaled)[0])
-    probas     = model.predict_proba(X_scaled)[0]  # [proba_classe_0, proba_classe_1]
+    # Generate prediction and probabilities
+    predicted_class_idx = int(model.predict(features_scaled)[0])
+    probabilities = model.predict_proba(features_scaled)[0]
 
-    # label_map : ex {0: 'M', 1: 'R'}
-    # On cherche quel index correspond à M et à R
-    idx_m = [k for k, v in label_map.items() if v == "M"][0]
-    idx_r = [k for k, v in label_map.items() if v == "R"][0]
+    # Map indices to original class labels
+    mine_idx = _find_class_index(label_map, "M")
+    rock_idx = _find_class_index(label_map, "R")
 
-    prob_mine = round(float(probas[idx_m]), 4)
-    prob_rock = round(float(probas[idx_r]), 4)
-    label     = label_map[pred_class]   # "M" ou "R"
+    prob_mine = round(float(probabilities[mine_idx]), 4)
+    prob_rock = round(float(probabilities[rock_idx]), 4)
+    predicted_label = label_map[predicted_class_idx]
+
+    logger.debug(
+        f"Prediction: {predicted_label} | "
+        f"Mine: {prob_mine:.4f} | Rock: {prob_rock:.4f}"
+    )
 
     return {
-        "prediction"      : label,
-        "label_full"      : "Mine" if label == "M" else "Rock",
+        "prediction": predicted_label,
+        "label_full": "Mine" if predicted_label == "M" else "Rock",
         "probability_mine": prob_mine,
         "probability_rock": prob_rock,
-        "confidence"      : round(max(prob_mine, prob_rock), 4),
-        "model_version"   : MODEL_VERSION,
+        "confidence": round(max(prob_mine, prob_rock), 4),
+        "model_version": MODEL_VERSION,
     }
+
+
+# 
+#  Utility Functions
+# 
+
+def _find_class_index(label_map: Dict[int, str], target_label: str) -> int:
+    """
+    Find the array index corresponding to a target class label.
+
+    Args:
+        label_map: Dictionary mapping indices to class labels.
+        target_label: Target label ("M" or "R").
+
+    Returns:
+        int: Index corresponding to target_label.
+
+    Raises:
+        ValueError: If target_label is not found in label_map.
+    """
+    for idx, label in label_map.items():
+        if label == target_label:
+            return idx
+
+    raise ValueError(f"Label '{target_label}' not found in label_map: {label_map}")
+
