@@ -45,9 +45,10 @@ jobs:
           pytest tests/ -v --tb=short
 
       # On baisse le seuil de couverture à 40% pour ne pas bloquer le projet au début
-      - name: Code Coverage
+      - name: Couverture de code
         run: |
           pip install pytest-cov
+          export PYTHONPATH=$PYTHONPATH:.
           pytest tests/ --cov=app --cov-report=term-missing --cov-fail-under=40
 
   # 🐳 JOB 2 : BUILD DOCKER
